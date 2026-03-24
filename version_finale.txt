@@ -1,0 +1,533 @@
+Pour les logs on ajoute :
+
+udp_server :
+from logger import log_request
+
+///// Dans le run server et try: ////
+
+try:
+     log_request(request, response, addr[0])
+except Exception as e:
+     print(f"[LOG ERROR] {e}")
+
+
+http server :
+from logger import log_request
+
+///// dans le def check ////
+
+
+log_request(text, annotated)
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+Résolution DNS :
+exemple : on lui donne un site web il nous donne son adresse IP et nous donne le site à l'envers
+
+Le fichier .py
+
+from flask import Flask, render_template, request
+import socket
+
+app = Flask(__name__)
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    mot_inverse = ""
+    ip = ""
+    erreur = ""
+
+    if request.method == "POST": #on a cliquer sur le bouton envoyé
+        mot = request.form["mot"] # ce qu'on a écrit dans la barre de recherche
+
+        mot_inverse = mot[::-1]
+
+        # 🌐 DNS
+        try:
+            ip = socket.gethostbyname(mot)
+        except:
+            erreur = "Domaine invalide ou non trouvé"
+
+    return render_template("index.html",
+                           inverse=mot_inverse,
+                           ip=ip,
+                           erreur2=erreur)
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
+________________________
+
+index.html sur le dossier templates
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Inverseur de mot</title>
+</head>
+<body>
+
+    <h2>Entrer un mot :</h2>
+
+    <form method="POST">
+        <input type="text" name="mot" placeholder="Tape ton mot">
+        <button type="submit">Valider</button>
+    </form>
+
+    <h3>le mot inversé c'est : {{ inverse }}</h3>
+    <h3>l'adresse IP : {{ ip }}</h3>
+    <h3 style="color:red;">{{ erreur2 }}</h3>
+</body>
+</html>
+
+
+//////////////////////////////////////////////////////////////////////////
+
+_________________TCP___________________
+
+serveur_tcp.py
+
+import socket
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.bind(('127.0.0.1', 5000))
+server.listen(1)
+
+print("wsh le serveur TCP est prêt...")
+
+conn, addr = server.accept()
+print("Client connecté :", addr)
+
+data = conn.recv(1024)
+print("Reçu :", data.decode())
+
+conn.send("OK".encode())
+
+conn.close()
+
+_____________________________________________________________________
+
+client_tcp.py
+
+import socket
+
+client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+client.connect(('127.0.0.1', 5000))
+
+client.send("Bonjour TCP".encode())
+
+response = client.recv(1024)
+print("Réponse :", response.decode())
+
+client.close()
+
+
+_____________ UDP _______________
+
+serveur_udp.py
+
+import socket
+
+server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+server.bind(('127.0.0.1', 6000))
+
+print("Serveur UDP prêt")
+
+data, addr = server.recvfrom(1024)
+print("Reçu :", data.decode())
+
+server.sendto("OK".encode(), addr)
+_____________________________________________________________________
+
+client_udp.py
+
+import socket
+
+server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+server.bind(('127.0.0.1', 6000))
+
+print("Serveur UDP prêt")
+
+data, addr = server.recvfrom(1024)
+print("Reçu :", data.decode())
+
+server.sendto("OK".encode(), addr)
+
+
+
+//////////// mettre les mots éronné dans un json ////////////
+
+http_server.py
+
+"""
+Serveur HTTP de correction orthographique (Flask + Jinja2).
+"""
+
+import argparse
+import re
+import sys
+import socket
+
+from flask import Flask, jsonify, render_template, request
+
+from dictionary_manager import DictionaryManager
+
+DEFAULT_HTTP_HOST = "0.0.0.0"
+DEFAULT_HTTP_PORT = 5000
+DEFAULT_UDP_HOST = "127.0.0.1"
+DEFAULT_UDP_PORT = 9999
+DEFAULT_DICT_DIR = "dictionaries"
+DEFAULT_MAX_SUGGESTIONS = 5
+
+app = Flask(__name__)
+
+dict_manager: DictionaryManager = None
+udp_host: str = DEFAULT_UDP_HOST
+udp_port: int = DEFAULT_UDP_PORT
+max_suggestions: int = DEFAULT_MAX_SUGGESTIONS
+
+
+def query_udp(language: str, word: str, technique: str) -> dict:
+    """
+    Interroge le serveur UDP pour vérifier/corriger un mot.
+    Version simple et fiable, avec timeout.
+    """
+    message = f"{language}:{word}:{technique}"
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(60.0)
+
+    try:
+        sock.sendto(message.encode("utf-8"), ("127.0.0.1", 9999))
+        data, _ = sock.recvfrom(4096)
+        response = data.decode("utf-8")
+    finally:
+        sock.close()
+
+    parts = response.split(":")
+
+    if len(parts) >= 2 and parts[1] == "OK":
+        return {"word": parts[0], "ok": True, "suggestions": []}
+
+    elif len(parts) >= 2 and parts[1] == "KO":
+        return {
+            "word": parts[0],
+            "ok": False,
+            "suggestions": [s for s in parts[2:] if s]
+        }
+
+    else:
+        raise Exception(response)
+
+
+def spellcheck_text(text: str, language: str, technique: str):
+    if language == "auto":
+        language = dict_manager.detect_language(text)
+
+    tokens = list(re.finditer(r"[a-zA-ZÀ-ÿ]+", text))
+    results = []
+
+    for i, match in enumerate(tokens):
+        word = match.group()
+
+        if not dict_manager.exists_anywhere(word):
+            dict_manager.save_unknown_word_simple(word)
+
+        result = query_udp(language, word, technique)
+        results.append({
+            "position": i,
+            "start": match.start(),
+            "end": match.end(),
+            "word": word,
+            "ok": result["ok"],
+            "suggestions": result.get("suggestions", []),
+        })
+
+    return results, language
+
+
+def build_annotated_html(text: str, results: list) -> str:
+    if not results:
+        return text
+
+    parts = []
+    last_end = 0
+
+    for r in results:
+        parts.append(text[last_end:r["start"]])
+
+        if r["ok"]:
+            parts.append(f'<span class="word-ok">{r["word"]}</span>')
+        else:
+            suggestions_html = ""
+            if r["suggestions"]:
+                items = "".join(f'<li>{s}</li>' for s in r["suggestions"][:5])
+                suggestions_html = f'<ul class="suggestions">{items}</ul>'
+
+            parts.append(
+                f'<span class="word-error">'
+                f'{r["word"]}'
+                f'<span class="tooltip">{suggestions_html}</span>'
+                f'</span>'
+            )
+
+        last_end = r["end"]
+
+    parts.append(text[last_end:])
+    return "".join(parts)
+
+
+@app.route("/", methods=["GET"])
+def index():
+    languages = ["auto"] + sorted(dict_manager.get_languages())
+    return render_template("index.html", languages=languages)
+
+
+@app.route("/check", methods=["POST"])
+def check():
+    text = request.form.get("text", "").strip()
+    language = request.form.get("language", "auto")
+    technique = request.form.get("technique", "levenshtein")
+    languages = ["auto"] + sorted(dict_manager.get_languages())
+
+    if not text:
+        return render_template("index.html", languages=languages, error="Veuillez entrer un texte.")
+
+    try:
+        results, detected_language = spellcheck_text(text, language, technique)
+    except Exception as e:
+        return render_template(
+            "index.html",
+            languages=languages,
+            error=f"Erreur lors de la correction : {e}"
+        )
+
+    annotated = build_annotated_html(text, results)
+
+    return render_template(
+        "result.html",
+        text=text,
+        annotated=annotated,
+        results=results,
+        language=language,
+        detected_language=detected_language,
+        technique=technique,
+        languages=languages,
+        error_count=sum(1 for r in results if not r["ok"]),
+    )
+
+
+@app.route("/api-doc", methods=["GET"])
+def api_doc():
+    return render_template("api_doc.html")
+
+
+@app.route("/spellcheck", methods=["POST"])
+def api_spellcheck():
+    if request.is_json:
+        data = request.get_json(force=True)
+    else:
+        data = request.form.to_dict()
+
+    text = data.get("text", "").strip()
+    language = data.get("language", "auto")
+    technique = data.get("technique", "levenshtein")
+
+    if not text:
+        return jsonify({"error": "Le champ 'text' est requis"}), 400
+
+    if technique not in ("levenshtein", "prefsuff"):
+        return jsonify({"error": "technique doit être 'levenshtein' ou 'prefsuff'"}), 400
+
+    try:
+        results, detected_language = spellcheck_text(text, language, technique)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    errors = [
+        {
+            "position": r["position"],
+            "start": r["start"],
+            "end": r["end"],
+            "word": r["word"],
+            "suggestions": r["suggestions"],
+        }
+        for r in results if not r["ok"]
+    ]
+
+    return jsonify({
+        "language": detected_language,
+        "technique": technique,
+        "errors": errors
+    })
+
+
+def main():
+    global dict_manager, udp_host, udp_port, max_suggestions
+
+    parser = argparse.ArgumentParser(description="Serveur HTTP de correction orthographique")
+    parser.add_argument("--http-host", default=DEFAULT_HTTP_HOST)
+    parser.add_argument("--http-port", type=int, default=DEFAULT_HTTP_PORT)
+    parser.add_argument("--udp-host", default=DEFAULT_UDP_HOST)
+    parser.add_argument("--udp-port", type=int, default=DEFAULT_UDP_PORT)
+    parser.add_argument("--dict", default=DEFAULT_DICT_DIR)
+    parser.add_argument("--max-suggestions", type=int, default=DEFAULT_MAX_SUGGESTIONS)
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args()
+
+    udp_host = args.udp_host
+    udp_port = args.udp_port
+    max_suggestions = args.max_suggestions
+
+    try:
+        dict_manager = DictionaryManager(args.dict)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"[ERREUR] {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[HTTP] Démarrage sur http://{args.http_host}:{args.http_port}")
+    print(f"[HTTP] Serveur UDP cible : {udp_host}:{udp_port}")
+    app.run(host=args.http_host, port=args.http_port, debug=args.debug)
+
+
+if __name__ == "__main__":
+    main()
+
+
+_____________________________________________________________________
+
+dictionnary_manager.py
+
+"""
+Module de gestion des dictionnaires orthographiques.
+Charge et maintient en mémoire les dictionnaires de toutes les langues disponibles.
+"""
+
+import json
+import os
+import re
+
+
+class DictionaryManager:
+    """Gère le chargement et l'accès aux dictionnaires de langues."""
+
+    def __init__(self, dictionaries_dir: str):
+        """
+        Initialise le gestionnaire en chargeant tous les dictionnaires du répertoire.
+
+        Args:
+            dictionaries_dir: Chemin vers le répertoire contenant les fichiers .txt
+        """
+        self.dictionaries: dict[str, set[str]] = {}
+        self.dictionaries_dir = dictionaries_dir
+        self._load_all(dictionaries_dir)
+
+    def _load_all(self, directory: str):
+        """Charge tous les fichiers .txt du répertoire comme dictionnaires."""
+        if not os.path.isdir(directory):
+            raise FileNotFoundError(f"Répertoire introuvable : {directory}")
+
+        for filename in os.listdir(directory):
+            if filename.endswith(".txt"):
+                language = filename[:-4]
+                filepath = os.path.join(directory, filename)
+                self._load_dict(language, filepath)
+
+        if not self.dictionaries:
+            raise ValueError(f"Aucun dictionnaire trouvé dans {directory}")
+
+    def _load_dict(self, language: str, filepath: str):
+        """Charge un fichier dictionnaire en mémoire."""
+        words = set()
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                word = line.strip().lower()
+                if word:
+                    words.add(word)
+        self.dictionaries[language] = words
+        print(f"[Dict] Chargé '{language}' : {len(words)} mots")
+
+    def get_languages(self) -> list[str]:
+        """Retourne la liste des langues disponibles."""
+        return list(self.dictionaries.keys())
+
+    def contains(self, language: str, word: str) -> bool:
+        """Vérifie si un mot est dans le dictionnaire d'une langue (insensible à la casse)."""
+        if language not in self.dictionaries:
+            raise ValueError(f"Langue inconnue : {language}")
+        return word.lower() in self.dictionaries[language]
+
+    def get_words(self, language: str) -> set[str]:
+        """Retourne l'ensemble des mots pour une langue donnée."""
+        if language not in self.dictionaries:
+            raise ValueError(f"Langue inconnue : {language}")
+        return self.dictionaries[language]
+
+    def detect_language(self, text: str) -> str:
+        """
+        Détecte la langue d'un texte en comptant les mots communs avec chaque dictionnaire.
+
+        Comportement voulu pour un correcteur orthographique :
+        - si des mots exacts du texte existent dans un dictionnaire, on prend la meilleure langue ;
+        - si aucun mot exact n'est reconnu, on ne bloque pas :
+          on prend 'french' si disponible, sinon la première langue disponible.
+        """
+        words = set(re.findall(r"[a-zA-ZÀ-ÿ]+", text.lower()))
+
+        if not self.dictionaries:
+            raise ValueError("Impossible de détecter la langue : aucun dictionnaire disponible")
+
+        best_language = None
+        best_count = -1
+
+        for language, dictionary in self.dictionaries.items():
+            count = len(words & dictionary)
+            if count > best_count:
+                best_count = count
+                best_language = language
+
+        if best_language is None:
+            raise ValueError("Impossible de détecter la langue : aucun dictionnaire disponible")
+
+        if best_count == 0:
+            if "french" in self.dictionaries:
+                return "french"
+            return self.get_languages()[0]
+
+        return best_language
+
+    def exists_anywhere(self, word: str) -> bool:
+        """
+        Vérifie si un mot existe dans au moins un dictionnaire chargé.
+        """
+        word = word.lower()
+        for dictionary in self.dictionaries.values():
+            if word in dictionary:
+                return True
+        return False
+
+    def save_unknown_word_simple(self, word: str):
+        """
+        Sauvegarde un mot inconnu dans unknown_words.json, sans doublon.
+        """
+        filepath = "unknown_words.json"
+        word = word.lower().strip()
+
+        if not word:
+            return
+
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
+                try:
+                    words = json.load(f)
+                except json.JSONDecodeError:
+                    words = []
+        else:
+            words = []
+
+        if word not in [w.lower() for w in words]:
+            words.append(word)
+
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(words, f, indent=4, ensure_ascii=False)
+_____________________________________________________________
